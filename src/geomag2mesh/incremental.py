@@ -326,8 +326,10 @@ def reconstruct_anchor(recs, dets, parts: PartCatalog, anchor: int, lifts, opts:
                 n_new += 1
                 assign[(v, i)] = f"N{n_new:03d}"
     sol, proj = solve_project(_build_project(recs, dets, parts, assign, pp_init),
-                              SolveOptions(restarts=2), verify=True, log=lambda *_: None)
+                              SolveOptions(restarts=2), verify=False, log=lambda *_: None)
     for _ in range(iterations):
+        if len(sol.labels) < 4:
+            break
         cams = {c.name: c for c in sol.cameras}
         model = _model_from_solution(sol)
         new_assign: dict[tuple[int, int], str] = {}
@@ -351,7 +353,7 @@ def reconstruct_anchor(recs, dets, parts: PartCatalog, anchor: int, lifts, opts:
             break
         assign = new_assign
         sol, proj = solve_project(_build_project(recs, dets, parts, assign, pp_init, intr),
-                                  SolveOptions(restarts=1), verify=True, log=lambda *_: None)
+                                  SolveOptions(restarts=1), verify=False, log=lambda *_: None)
     return sol, proj
 
 
