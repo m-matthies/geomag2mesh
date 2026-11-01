@@ -265,3 +265,110 @@ def finish(recs, dets, parts: PartCatalog, sol, log=print, pose_sigma_deg: float
         else:
             v.camera["principal_init"] = [float(c.K[0, 2]), float(c.K[1, 2])]
     return solve_project(proj, SolveOptions(restarts=2), verify=True, log=log)
+
+
+# =========================================================================== anchor-based (joint)
+def _build_project(recs, dets, parts, assign: dict[tuple[int, int], str], pp_init: dict[int, tuple],
+                   intr: dict[int, tuple] | None = None) -> Project:
+    """Project from a detection -> label assignment. Intrinsics: focal and principal point
+    free (photos cropped by unknown amounts), starting from ``pp_init`` / ``intr``."""
+    views = []
+    rods: dict[frozenset, dict[str, float]] = {}
+    for v, (rec, d) in enumerate(zip(recs, dets)):
+        sph = {}
+        for i, s in enumerate(d.spheres):
+            lab = assign.get((v, i))
+            if lab is not None and lab not in sph:
+                sph[lab] = Obs(s.x, s.y, s.r, float(np.clip(s.score / 0.6, 0.3, 1.0)))
+        pr = rec.prior
+        f0 = intr[v][0] if intr and v in intr else pr.focal_px
+        cam = {"focal_px": f0, "focal_sigma_rel": pr.focal_sigma_rel, "camera_id": pr.camera_id}
+        if pr.principal is not None:
+            cam.update(principal=list(pr.principal), principal_known=True)
+        else:
+            init = intr[v][1] if intr and v in intr else pp_init.get(v, _principal(rec))
+            cam.update(principal_known=False, principal_init=[float(init[0]), float(init[1])])
+        views.append(View(rec.name, str(rec.path), rec.width, rec.height, sph, cam))
+        for rd in d.rods:
+            a, b = assign.get((v, rd.i)), assign.get((v, rd.j))
+            if a and b and a != b:
+                rods.setdefault(frozenset((a, b)), {}).setdefault(rd.color, 0.0)
+                rods[frozenset((a, b))][rd.color] += 1.0
+    rod_list = [Rod(*sorted(k), max(c, key=c.get)) for k, c in rods.items()]
+    return Project(views=views, rods=rod_list, auto_contacts=True, parts=parts)
+
+
+def reconstruct_anchor(recs, dets, parts: PartCatalog, anchor: int, lifts, opts: IncrementalOptions,
+                       iterations: int = 3, log=print):
+    """Tracks from resecting every photo against the anchor photo's lifted cloud, then
+    alternate joint bundle adjustment (free intrinsics) and re-resection of every photo
+    against the improved model."""
+    from .pipeline import solve_project
+    lv = lifts[anchor]
+    amodel = Model(lv.X, lv.rods)
+    assign: dict[tuple[int, int], str] = {(anchor, i): f"A{i:02d}" for i in range(len(dets[anchor].spheres))}
+    pp_init: dict[int, tuple] = {anchor: _principal(recs[anchor])}
+    n_new = 0
+    for v in range(len(recs)):
+        if v == anchor:
+            continue
+        res = resect_any_pp(amodel, dets[v], recs[v], parts.sphere_radius_mm,
+                            ResectOptions(reproj_tol=opts.seed_tol, radius_tol=0.3), top_k=1)
+        matched = {}
+        if res and len(res[0][0].matches) >= opts.min_matches:
+            r, pp = res[0]
+            matched = {i: f"A{j:02d}" for i, j in r.matches}
+            pp_init[v] = pp
+        for i in range(len(dets[v].spheres)):
+            if i in matched:
+                assign[(v, i)] = matched[i]
+            else:
+                n_new += 1
+                assign[(v, i)] = f"N{n_new:03d}"
+    sol, proj = solve_project(_build_project(recs, dets, parts, assign, pp_init),
+                              SolveOptions(restarts=2), verify=True, log=lambda *_: None)
+    for _ in range(iterations):
+        cams = {c.name: c for c in sol.cameras}
+        model = _model_from_solution(sol)
+        new_assign: dict[tuple[int, int], str] = {}
+        intr = {}
+        n_new = 0
+        for v, (rec, d) in enumerate(zip(recs, dets)):
+            c = cams.get(rec.name)
+            if c is None:
+                continue
+            intr[v] = (c.focal_px, tuple(c.principal))
+            res = resect(model, d, c.focal_px, tuple(c.principal), parts.sphere_radius_mm,
+                         ResectOptions(reproj_tol=opts.grow_tol, radius_tol=0.3), top_k=1)
+            matched = {i: sol.labels[j] for i, j in res[0].matches} if res else {}
+            for i in range(len(d.spheres)):
+                if i in matched:
+                    new_assign[(v, i)] = matched[i]
+                else:
+                    n_new += 1
+                    new_assign[(v, i)] = f"M{n_new:03d}"
+        if new_assign == assign:
+            break
+        assign = new_assign
+        sol, proj = solve_project(_build_project(recs, dets, parts, assign, pp_init, intr),
+                                  SolveOptions(restarts=1), verify=True, log=lambda *_: None)
+    return sol, proj
+
+
+def reconstruct_joint(recs, dets, parts: PartCatalog, opts: IncrementalOptions | None = None, log=print):
+    """Try every photo as anchor; keep the reconstruction that explains the photos best."""
+    opts = opts or IncrementalOptions()
+    lifts = {v: lift_view(d, r.prior.focal_px, _principal(r), True, parts.pitch_mm(), parts.sphere_diameter_mm)
+             for v, (r, d) in enumerate(zip(recs, dets)) if len(d.spheres) >= 3}
+    best = None
+    for a in lifts:
+        try:
+            sol, proj = reconstruct_anchor(recs, dets, parts, a, lifts, opts, log=log)
+        except Exception as e:
+            log(f"anchor {recs[a].name} failed: {e}")
+            continue
+        sc = explain_score(sol, proj)
+        log(f"anchor {recs[a].name}: {len(sol.labels)} spheres, {len(sol.rods)} rods, explain score {sc:.1f}")
+        if best is None or sc > best[0]:
+            best = (sc, sol, proj, recs[a].name)
+    return best
