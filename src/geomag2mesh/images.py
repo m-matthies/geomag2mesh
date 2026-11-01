@@ -49,6 +49,27 @@ class CameraPrior:
     pose_sigma_deg: float = 0.2
     pose_sigma_mm: float = 1.0
     principal: tuple | None = None   # known principal point (px), e.g. a crop with known offset
+    orig_size: tuple | None = None   # (w, h) of the uncropped sensor frame (either orientation)
+    principal_init: tuple | None = None  # starting value for an unknown principal point
+
+    def principal_candidates(self, width: int, height: int, nx: int = 5, ny: int = 6,
+                             margin: float = 0.05) -> list[tuple[float, float]]:
+        """Principal points to try: the known one, or a grid over all positions a crop of
+        this size can have inside the original frame (plus a small margin)."""
+        if self.principal is not None:
+            return [tuple(self.principal)]
+        if self.principal_known or self.orig_size is None:
+            return [(width / 2.0, height / 2.0)]
+        out: list[tuple[float, float]] = []
+        a, b = self.orig_size
+        for W0, H0 in {(a, b), (b, a)}:       # every orientation the crop fits in
+            if width > W0 * (1 + margin) or height > H0 * (1 + margin):
+                continue
+            mx, my = margin * W0, margin * H0
+            xs = np.linspace(W0 / 2 - (W0 - width) - mx, W0 / 2 + mx, nx)
+            ys = np.linspace(H0 / 2 - (H0 - height) - my, H0 / 2 + my, ny)
+            out += [(float(x), float(y)) for x in xs for y in ys]
+        return out or [(width / 2.0, height / 2.0)]
 
     @property
     def has_pose(self) -> bool:
@@ -108,7 +129,7 @@ def camera_prior(width: int, height: int, info: dict) -> CameraPrior:
         return CameraPrior(f_orig * s, 0.08, True, cam_id + f"|scaled{width}x{height}")
     # Cropped: assume unscaled crop (focal in original pixels); widen the prior
     # because a crop that was also rescaled cannot be identified from metadata.
-    return CameraPrior(f_orig, 0.15, False, cam_id)
+    return CameraPrior(f_orig, 0.15, False, cam_id, orig_size=(ow, oh))
 
 
 def load_record(path: str | Path) -> ImageRecord:
@@ -148,7 +169,9 @@ def priors_for_project(project) -> dict[str, CameraPrior]:
                                       tuple(c["tvec"]) if c.get("tvec") is not None else None,
                                       float(c.get("pose_sigma_deg", 0.2)),
                                       float(c.get("pose_sigma_mm", 1.0)),
-                                      tuple(map(float, c["principal"])) if c.get("principal") else None)
+                                      tuple(map(float, c["principal"])) if c.get("principal") else None,
+                                      principal_init=tuple(map(float, c["principal_init"]))
+                                      if c.get("principal_init") else None)
             if out[v.name].principal is not None:
                 out[v.name].principal_known = True
             continue

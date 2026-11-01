@@ -195,6 +195,9 @@ class _Problem:
         # fixed principal points: explicit (known crop offset) or the image centre
         self._centres = np.array([pr.principal if pr.principal is not None else (v.width / 2.0, v.height / 2.0)
                                   for pr, v in zip(self.priors, project.views)], float)
+        for vi in self.pp_view:  # unknown principal points start from their hint (or centre)
+            if self.priors[vi].principal_init is not None:
+                self._centres[vi] = self.priors[vi].principal_init
         self.pose_views = np.array([i for i, pr in enumerate(self.priors)
                                     if pr.has_pose and i in self.active], int)
         self.pose_r0 = np.array([self.priors[i].rvec for i in self.pose_views], float).reshape(-1, 3)
@@ -216,6 +219,14 @@ class _Problem:
         if vi in self.pp_slot:
             return pp[self.pp_slot[vi]]
         return self._centres[vi].copy()
+
+    def pp_init(self, vi: int) -> tuple[float, float]:
+        """Starting value of an unknown principal point (prior hint or image centre)."""
+        pr = self.priors[vi]
+        if pr.principal_init is not None:
+            return tuple(pr.principal_init)
+        v = self.p.views[vi]
+        return (v.width / 2.0, v.height / 2.0)
 
     def principal_all(self, pp: np.ndarray) -> np.ndarray:
         """(V, 2) principal points, vectorised for the residual function."""
@@ -388,7 +399,7 @@ def _initialise_posed(prob: _Problem, rng: np.random.Generator, jitter: float) -
     X = _place_unobserved(prob, X, rng)
     if jitter > 0:
         X = X + rng.normal(0, jitter, X.shape)
-    pp = np.array([[prob.p.views[v].width / 2.0, prob.p.views[v].height / 2.0] for v in prob.pp_view]
+    pp = np.array([prob.pp_init(v) for v in prob.pp_view]
                   ).reshape(-1, 2)
     return prob.pack(X, cams, prob.f0.copy(), pp)
 
@@ -458,7 +469,7 @@ def _initialise(prob: _Problem, rng: np.random.Generator, jitter: float = 0.0) -
 
     # cameras by PnP against the initial structure
     cams = np.zeros((prob.V, 6))
-    pp = np.array([[prob.p.views[v].width / 2.0, prob.p.views[v].height / 2.0] for v in prob.pp_view]
+    pp = np.array([prob.pp_init(v) for v in prob.pp_view]
                   ).reshape(-1, 2)
     for vi, v in enumerate(prob.p.views):
         ks = [prob.lid[k] for k in v.spheres]
