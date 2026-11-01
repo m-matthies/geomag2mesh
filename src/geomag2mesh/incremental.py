@@ -288,6 +288,9 @@ def _build_project(recs, dets, parts, assign: dict[tuple[int, int], str], pp_ini
         else:
             init = intr[v][1] if intr and v in intr else pp_init.get(v, _principal(rec))
             cam.update(principal_known=False, principal_init=[float(init[0]), float(init[1])])
+            box = pr.feasible_box(rec.width, rec.height)
+            if box is not None:
+                cam["principal_box"] = [list(box[0]), list(box[1])]
         views.append(View(rec.name, str(rec.path), rec.width, rec.height, sph, cam))
         for rd in d.rods:
             a, b = assign.get((v, rd.i)), assign.get((v, rd.j))
@@ -299,61 +302,83 @@ def _build_project(recs, dets, parts, assign: dict[tuple[int, int], str], pp_ini
 
 
 def reconstruct_anchor(recs, dets, parts: PartCatalog, anchor: int, lifts, opts: IncrementalOptions,
-                       iterations: int = 3, log=print):
+                       schedule=(1.0, 0.75, 0.55, 0.45), log=print, on_iter=None):
     """Tracks from resecting every photo against the anchor photo's lifted cloud, then
-    alternate joint bundle adjustment (free intrinsics) and re-resection of every photo
-    against the improved model."""
+    alternate joint bundle adjustment (shared focal length, free principal points inside
+    their feasible crop box) and re-resection of every photo against the improved model
+    with a tightening tolerance ``schedule``. Re-resection only *adds* matches for
+    detections without a confident label or reassigns detections whose new match is
+    clearly better, so the track set cannot collapse."""
     from .pipeline import solve_project
     lv = lifts[anchor]
     amodel = Model(lv.X, lv.rods)
     assign: dict[tuple[int, int], str] = {(anchor, i): f"A{i:02d}" for i in range(len(dets[anchor].spheres))}
     pp_init: dict[int, tuple] = {anchor: _principal(recs[anchor])}
-    n_new = 0
     for v in range(len(recs)):
         if v == anchor:
             continue
         res = resect_any_pp(amodel, dets[v], recs[v], parts.sphere_radius_mm,
                             ResectOptions(reproj_tol=opts.seed_tol, radius_tol=0.3), top_k=1)
-        matched = {}
         if res and len(res[0][0].matches) >= opts.min_matches:
             r, pp = res[0]
-            matched = {i: f"A{j:02d}" for i, j in r.matches}
             pp_init[v] = pp
-        for i in range(len(dets[v].spheres)):
-            if i in matched:
-                assign[(v, i)] = matched[i]
-            else:
-                n_new += 1
-                assign[(v, i)] = f"N{n_new:03d}"
-    sol, proj = solve_project(_build_project(recs, dets, parts, assign, pp_init),
-                              SolveOptions(restarts=2), verify=False, log=lambda *_: None)
-    for _ in range(iterations):
-        if len(sol.labels) < 4:
-            break
+            for i, j in r.matches:
+                assign[(v, i)] = f"A{j:02d}"
+
+    def labelled_project(intr=None):
+        full = dict(assign)
+        n = 0
+        for v, d in enumerate(dets):
+            for i in range(len(d.spheres)):
+                if (v, i) not in full:
+                    n += 1
+                    full[(v, i)] = f"U{v}_{i:02d}"   # unmatched: single-photo sphere
+        return _build_project(recs, dets, parts, full, pp_init, intr)
+
+    sol, proj = solve_project(labelled_project(), SolveOptions(restarts=3), verify=False,
+                              log=lambda *_: None)
+    if on_iter:
+        on_iter("start", sol, proj)
+    for tol in schedule:
         cams = {c.name: c for c in sol.cameras}
-        model = _model_from_solution(sol)
-        new_assign: dict[tuple[int, int], str] = {}
+        multi = [k for k in sol.labels if not k.startswith("U")]
+        if len(multi) < 4:
+            break
+        Xm = np.array([sol.X[sol.index(k)] for k in multi])
+        mrods = [(multi.index(r.a), multi.index(r.b), r.color) for r in sol.rods
+                 if r.a in multi and r.b in multi]
+        model = Model(Xm, mrods)
         intr = {}
-        n_new = 0
+        changed = False
         for v, (rec, d) in enumerate(zip(recs, dets)):
             c = cams.get(rec.name)
             if c is None:
                 continue
             intr[v] = (c.focal_px, tuple(c.principal))
             res = resect(model, d, c.focal_px, tuple(c.principal), parts.sphere_radius_mm,
-                         ResectOptions(reproj_tol=opts.grow_tol, radius_tol=0.3), top_k=1)
-            matched = {i: sol.labels[j] for i, j in res[0].matches} if res else {}
-            for i in range(len(d.spheres)):
-                if i in matched:
-                    new_assign[(v, i)] = matched[i]
-                else:
-                    n_new += 1
-                    new_assign[(v, i)] = f"M{n_new:03d}"
-        if new_assign == assign:
-            break
-        assign = new_assign
-        sol, proj = solve_project(_build_project(recs, dets, parts, assign, pp_init, intr),
-                                  SolveOptions(restarts=1), verify=False, log=lambda *_: None)
+                         ResectOptions(reproj_tol=tol, radius_tol=0.3), top_k=1)
+            if not res or len(res[0].matches) < opts.min_matches:
+                continue
+            taken = {assign[(v, i)] for i in range(len(d.spheres)) if (v, i) in assign}
+            for i, j in res[0].matches:
+                lab = multi[j]
+                if assign.get((v, i)) == lab:
+                    continue
+                if lab in taken and assign.get((v, i)) != lab:
+                    # label already used by another detection of this photo: reassign only
+                    # if this resection is internally consistent (it is one-to-one), i.e.
+                    # move the label
+                    for key in [k for k, l in assign.items() if k[0] == v and l == lab]:
+                        del assign[key]
+                assign[(v, i)] = lab
+                taken.add(lab)
+                changed = True
+        if not changed:
+            continue
+        sol, proj = solve_project(labelled_project(intr), SolveOptions(restarts=1), verify=False,
+                                  log=lambda *_: None)
+        if on_iter:
+            on_iter(f"tol {tol}", sol, proj)
     return sol, proj
 
 

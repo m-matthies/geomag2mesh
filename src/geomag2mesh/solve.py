@@ -195,6 +195,11 @@ class _Problem:
         # fixed principal points: explicit (known crop offset) or the image centre
         self._centres = np.array([pr.principal if pr.principal is not None else (v.width / 2.0, v.height / 2.0)
                                   for pr, v in zip(self.priors, project.views)], float)
+        boxed = [(k, vi) for k, vi in enumerate(self.pp_view) if self.priors[vi].principal_box is not None]
+        self.pp_box_slots = np.array([k for k, _ in boxed], int)
+        self.pp_box_views = np.array([vi for _, vi in boxed], int)
+        self.pp_box_lo = np.array([self.priors[vi].principal_box[0] for _, vi in boxed], float).reshape(-1, 2)
+        self.pp_box_hi = np.array([self.priors[vi].principal_box[1] for _, vi in boxed], float).reshape(-1, 2)
         for vi in self.pp_view:  # unknown principal points start from their hint (or centre)
             if self.priors[vi].principal_init is not None:
                 self._centres[vi] = self.priors[vi].principal_init
@@ -267,6 +272,11 @@ class _Problem:
         if self.support_plane:  # mat frame: nothing passes through the mat (z = 0, z up)
             out.append(np.minimum(X[:, 2] - self.R_mm, 0.0) / self.opts.contact_tol_mm)
         out.append((f - self.f0) / (self.fsig * self.f0))
+        if len(self.pp_box_views):  # soft walls keep unknown principal points inside the crop range
+            c = pp[self.pp_box_slots]
+            below = np.minimum(c - self.pp_box_lo, 0)
+            above = np.maximum(c - self.pp_box_hi, 0)
+            out.append(((below + above) / (0.02 * self.f0[self.group[self.pp_box_views]][:, None])).ravel())
         if len(self.pose_views):
             pv = self.pose_views
             dr = (Rotation.from_rotvec(cams[pv, :3]) * Rotation.from_rotvec(self.pose_r0).inv()).as_rotvec()
@@ -314,6 +324,10 @@ class _Problem:
         for g in range(self.G):
             S[r, self.off_f + g] = 1
             r += 1
+        for k in self.pp_box_slots:
+            for a in range(2):
+                S[r, self.off_pp + 2 * int(k) + a] = 1
+                r += 1
         if len(self.pose_views):
             for v in self.pose_views:
                 for a in range(3):

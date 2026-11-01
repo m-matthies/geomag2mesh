@@ -51,6 +51,16 @@ class CameraPrior:
     principal: tuple | None = None   # known principal point (px), e.g. a crop with known offset
     orig_size: tuple | None = None   # (w, h) of the uncropped sensor frame (either orientation)
     principal_init: tuple | None = None  # starting value for an unknown principal point
+    principal_box: tuple | None = None   # ((xmin, ymin), (xmax, ymax)) feasible principal points
+
+    def feasible_box(self, width: int, height: int, margin: float = 0.05):
+        """Bounding box of all principal points a crop of this size can have (both
+        sensor orientations), or None if unknown."""
+        if self.orig_size is None or self.principal_known or self.principal is not None:
+            return None
+        c = self.principal_candidates(width, height, nx=2, ny=2, margin=margin)
+        a = np.array(c)
+        return (tuple(a.min(0)), tuple(a.max(0)))
 
     def principal_candidates(self, width: int, height: int, nx: int = 5, ny: int = 6,
                              margin: float = 0.05) -> list[tuple[float, float]]:
@@ -171,7 +181,9 @@ def priors_for_project(project) -> dict[str, CameraPrior]:
                                       float(c.get("pose_sigma_mm", 1.0)),
                                       tuple(map(float, c["principal"])) if c.get("principal") else None,
                                       principal_init=tuple(map(float, c["principal_init"]))
-                                      if c.get("principal_init") else None)
+                                      if c.get("principal_init") else None,
+                                      principal_box=tuple(tuple(map(float, p)) for p in c["principal_box"])
+                                      if c.get("principal_box") else None)
             if out[v.name].principal is not None:
                 out[v.name].principal_known = True
             continue
