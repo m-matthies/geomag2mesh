@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+# outputs of geomag2mesh runs
+out/
+out_*/
+*.glb
+*.stl
+*.obj
+!examples/**/*.glb

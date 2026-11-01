@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }}${{ matrix.lowest && ' / lowest deps' || '' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        lowest: [false]
+        include:
+          - { os: macos-latest, python: "3.13", lowest: false }
+          - { os: windows-latest, python: "3.13", lowest: false }
+          # declared minimum versions from pyproject.toml (numpy 1.24, scipy 1.10, opencv 4.8, ...)
+          - { os: ubuntu-latest, python: "3.10", lowest: true }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+      - name: Install
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip uv
+          python -m uv pip install --system ${{ matrix.lowest && '-c ci/constraints-min.txt' || '' }} -e ".[all,dev]"
+      - name: Versions
+        run: python -c "import sys, numpy, scipy, cv2, trimesh, PIL; print(sys.version, 'numpy', numpy.__version__, 'scipy', scipy.__version__, 'opencv', cv2.__version__, 'trimesh', trimesh.__version__, 'pillow', PIL.__version__)"
+      - name: Tests
+        run: python -m pytest -q -ra
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          geomag2mesh mat -o mat.pdf
+          geomag2mesh solve examples/twin_cube/annotations.json -o out_ci
+          test -s out_ci/model.stl && test -s out_ci/model.glb && test -s out_ci/report.md
+      - name: Upload example output
+        if: always() && matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        uses: actions/upload-artifact@v4
+        with:
+          name: example-output
+          path: out_ci/
+          if-no-files-found: ignore

@@ -1,0 +1,10 @@
+# Lowest dependency versions declared in pyproject.toml (tested in CI on Python 3.10).
+numpy==1.24.*
+scipy==1.10.*
+opencv-python-headless==4.8.*
+pillow==10.0.*
+trimesh==4.0.*
+pillow-heif==0.13.*
+manifold3d==2.3.*
+matplotlib==3.7.*
+pytest==7.*

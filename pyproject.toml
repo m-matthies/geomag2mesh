@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geomag2mesh"
+version = "0.1.0"
+description = "Reconstruct 3-D meshes of Geomag-style ball-and-rod magnetic constructions from photographs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "m-matthies" }]
+keywords = ["geomag", "photogrammetry", "bundle-adjustment", "mesh", "3d-reconstruction"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "opencv-python-headless>=4.8",  # ArUco/ChArUco is in the main module since 4.7
+  "pillow>=10",
+  "trimesh>=4.0",
+]
+
+[project.optional-dependencies]
+heic = ["pillow-heif>=0.13"]
+stl = ["manifold3d>=2.3"]
+gui = ["matplotlib>=3.7"]
+all = ["pillow-heif>=0.13", "manifold3d>=2.3", "matplotlib>=3.7"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+geomag2mesh = "geomag2mesh.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: end-to-end tests that render photos and run the full pipeline (~1 min)"]
